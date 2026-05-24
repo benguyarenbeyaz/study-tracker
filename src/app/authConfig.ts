@@ -4,7 +4,7 @@ export const msalConfig: Configuration = {
   auth: {
     clientId: "558495ff-c275-444a-ab94-2c08bbdb3576",
     authority: "https://login.microsoftonline.com/common", 
-    redirectUri: "https://zany-zebra-qgxvxwvrp5gc456-3000.app.github.dev",
+    redirectUri: typeof window !== "undefined" ? window.location.origin : "/",
   },
   cache: {
     cacheLocation: "sessionStorage",
