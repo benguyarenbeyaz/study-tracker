@@ -388,7 +388,7 @@ export default function Sidebar({
               <button onClick={addCategory} className="bg-neutral-800 hover:bg-neutral-700 px-5 rounded-lg text-sm font-semibold text-neutral-200 transition-colors outline-none">Add</button>
             </div>
             <div className="space-y-2 max-h-48 overflow-y-auto pr-2 custom-scrollbar">
-              {categories.map((c: string) => (
+              {[...categories].sort((a, b) => a.localeCompare(b)).map((c: string) => (
                 <div key={c} className="flex justify-between items-center p-2.5 border border-neutral-800/80 rounded-lg bg-neutral-900/30 hover:bg-neutral-900/50 transition-colors group">
                   {editingCat === c ? (
                     <div className="flex flex-1 gap-2 mr-2">

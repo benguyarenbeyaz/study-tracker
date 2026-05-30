@@ -10,8 +10,11 @@ import AnalyticsTab from "./components/AnalyticsTab";
 import CalendarTab from "./components/CalendarTab";
 import TimelapseTab from "./components/TimelapseTab";
 import Sidebar from './components/Sidebar';
+import FilmsTab from './components/FilmsTab';
+import BooksTab from './components/BooksTab';
+import LanguageTab from './components/LanguageTab';
 
-const TABS = ["Pomodoro", "Master Log", "Backlog", "Analytics", "Calendar", "Timelapse"];
+const TABS = ["Pomodoro", "Master Log", "Backlog", "Analytics", "Calendar", "Timelapse", "Films", "Books", "Language"];
 
 // === PREMIUM INLINE AUTH COMPONENT ===
 const ProfessionalAuth = () => {
@@ -236,6 +239,9 @@ export default function Home() {
             {activeTab === "Analytics" && <AnalyticsTab appState={appState} />}
             {activeTab === "Calendar" && <CalendarTab appState={appState} />}
             {activeTab === "Timelapse" && <TimelapseTab appState={appState} />}
+            {activeTab === "Films" && <FilmsTab appState={appState} />}
+            {activeTab === "Books" && <BooksTab appState={appState} />}
+            {activeTab === "Language" && <LanguageTab appState={appState} />}
           </div>
         </div>
 

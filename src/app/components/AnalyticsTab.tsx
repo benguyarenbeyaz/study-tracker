@@ -80,6 +80,64 @@ export default function AnalyticsTab({ appState }: { appState: any }) {
     return h > 0 ? `${h}h ${min > 0 ? min + 'm' : ''}` : `${min}m`;
   };
 
+  const parseTimeStr = (timeStr: string) => {
+    if (!timeStr) return 0;
+    const str = String(timeStr).trim();
+    if (/^\d+$/.test(str)) return parseInt(str, 10);
+    let mins = 0;
+    const hMatch = str.match(/(\d+(?:\.\d+)?)\s*h/i);
+    const mMatch = str.match(/(\d+(?:\.\d+)?)\s*m/i);
+    if (hMatch) mins += parseFloat(hMatch[1]) * 60;
+    if (mMatch) mins += parseFloat(mMatch[1]);
+    return mins;
+  };
+
+  const calcDiff = (start: string, end: string) => {
+    if (!start || !end) return 0;
+    const [sh, sm] = start.split(':').map(Number);
+    const [eh, em] = end.split(':').map(Number);
+    if (isNaN(sh) || isNaN(sm) || isNaN(eh) || isNaN(em)) return 0;
+    let diff = (eh * 60 + em) - (sh * 60 + sm);
+    if (diff < 0) diff += 24 * 60; 
+    return diff;
+  };
+
+  const calculateTaskTotals = (task: any) => {
+    let sessionLogMins = 0;
+    let sessionEstMins = 0;
+    
+    if (task.sessions && task.sessions.length > 0) {
+      task.sessions.forEach((s: any) => {
+        if (s.subsessions && s.subsessions.length > 0) {
+           s.subsessions.forEach((sub: any) => {
+              sessionLogMins += (parseTimeStr(String(sub.time_logged || "")) || calcDiff(sub.start_time, sub.end_time) || 0);
+              sessionEstMins += parseTimeStr(sub.est_time || "0m");
+           });
+        } else {
+           sessionLogMins += (parseTimeStr(String(s.time_logged || "")) || calcDiff(s.start_time, s.end_time) || 0);
+           sessionEstMins += parseTimeStr(s.est_time || "0m");
+        }
+      });
+    }
+    
+    let totalLogMins = sessionLogMins;
+    let totalEstMins = sessionEstMins;
+
+    if (task["Time Logged"] !== undefined && String(task["Time Logged"]).trim() !== "") {
+        totalLogMins = parseTimeStr(task["Time Logged"]);
+    } else if (!task.sessions || task.sessions.length === 0) {
+        totalLogMins += calcDiff(task.Start, task.End);
+    }
+    
+    totalLogMins += (Number(task["Pomodoros (done)"]) || 0) * 25;
+
+    if (task["Est. Time"] !== undefined && String(task["Est. Time"]).trim() !== "") {
+        totalEstMins = parseTimeStr(task["Est. Time"]);
+    }
+    
+    return { rawLogged: totalLogMins, rawEst: totalEstMins };
+  };
+
   const parseDateStr = (dateStr: string) => {
     if (!dateStr) return new Date(0);
     if (dateStr.includes('-')) {
@@ -198,9 +256,9 @@ export default function AnalyticsTab({ appState }: { appState: any }) {
 
       const cat = t.Category || "Other";
       if (!stats[cat]) stats[cat] = { logged: 0, est: 0, activeTasks: [] };
-      let logged = (Number(t["Pomodoros (done)"]) || 0) * 25;
-      (t.sessions || []).forEach((s: any) => logged += Number(s.time_logged || 0));
-      const est = (Number(t["Est. Time"]?.replace(/h|m/g, '')) || 0) * (t["Est. Time"]?.includes('h') ? 60 : 1);
+      const totals = calculateTaskTotals(t);
+      const logged = totals.rawLogged;
+      const est = totals.rawEst;
       
       stats[cat].logged += logged;
       stats[cat].est += est;

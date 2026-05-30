@@ -495,7 +495,7 @@ export default function BacklogTab({ appState, onSave }: { appState: any; onSave
                     <td className="px-4 py-2 align-top pt-3 min-w-0">
                       <div className="flex items-center justify-end gap-3 w-full opacity-0 group-hover:opacity-100 transition-opacity">
                         <button onClick={(e) => { e.stopPropagation(); moveToMasterLog(task.Name); }} className="text-slate-500 hover:text-indigo-400 transition-colors text-[16px] leading-none" title="Move to Master Log">↗</button>
-                        <button onClick={(e) => { e.stopPropagation(); deleteTask(task.Name); }} className="hover:scale-110 transition-transform text-[14px] leading-none" title="Delete permanently">🗑️</button>
+                        <button onClick={(e) => { e.stopPropagation(); deleteTask(task.Name); }} className="hover:scale-110 transition-transform text-xs leading-none" title="Delete permanently">🗑️</button>
                       </div>
                     </td>
                   </tr>
@@ -509,52 +509,85 @@ export default function BacklogTab({ appState, onSave }: { appState: any; onSave
 
       {/* ================= COLLAPSIBLE SUBTASK PANEL ================= */}
       {showSubtasks && (
-        <div className="w-[320px] shrink-0 flex flex-col h-full bg-[#080B10] border-l border-slate-800 shadow-2xl transition-all duration-300 ease-in-out">
-          
-          <div className="px-5 py-4 border-b border-slate-800/80 bg-transparent shrink-0 flex justify-between items-center">
-            <h2 className="text-[11px] font-bold text-slate-200 uppercase tracking-widest">Subtasks</h2>
-            <button onClick={() => setShowSubtasks(false)} className="text-slate-500 hover:text-slate-300 xl:hidden">✕</button>
+        <div className="w-[300px] shrink-0 bg-[#080a0f] flex flex-col border-l border-slate-800/80 shadow-2xl relative z-10">
+          <div className="px-4 py-3 border-b border-slate-800/60 flex justify-between items-center bg-[#06080c]">
+            <h2 className="text-[12px] font-bold text-slate-300 uppercase tracking-widest">
+              Subtasks
+            </h2>
+            <span className="text-[10px] bg-slate-800 text-slate-400 px-1.5 py-0.5 rounded">
+              {activeTask ? (subtaskDict[activeTask] || []).filter((s: any) => !s.done).length : 0}
+            </span>
           </div>
 
-          <div className="flex-1 flex flex-col min-h-0 relative p-4">
-            {activeTask ? (
-              <>
-                <div className="mb-5 shrink-0 border-b border-slate-800 pb-1">
-                  <AutoTextarea 
-                    value={activeTask} 
-                    onChange={(val: string) => updateTaskField(activeTask, "Name", val)}
-                    className="text-slate-200 font-semibold text-[14px] leading-snug"
-                  />
-                </div>
-                
-                <div className="flex gap-2 mb-4 shrink-0 bg-[#0f121a] border border-slate-800/80 rounded px-2 py-1.5 focus-within:border-indigo-500/50 transition-colors">
-                  <input type="text" value={newSubtask} onChange={(e) => setNewSubtask(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleAddSubtask()} placeholder="Add a subtask..." className="flex-1 bg-transparent text-[13px] text-slate-300 focus:outline-none placeholder-slate-600" />
-                  <button onClick={handleAddSubtask} className="text-slate-500 hover:text-indigo-400 font-medium transition-colors outline-none px-1">↵</button>
-                </div>
+          <div className="flex-1 overflow-hidden relative">
+            {activeTask ? (() => {
+              const currentSubs = (subtaskDict[activeTask] || []).map((sub: any, originalIdx: number) => ({ ...sub, originalIdx }));
+              const sortedSubs = [...currentSubs].sort((a, b) => (a.done === b.done ? 0 : a.done ? 1 : -1));
 
-                <div className="flex-1 overflow-y-auto custom-scrollbar space-y-0.5">
-                  {(subtaskDict[activeTask] || []).map((sub: any, idx: number) => (
-                    <div key={`sub-${idx}`} draggable onDragStart={(e) => handleSubtaskDragStart(e, idx)} onDragOver={handleRowDragOver} onDrop={(e) => handleSubtaskDrop(e, idx)} className="flex items-start gap-2.5 py-2 px-1 group cursor-grab active:cursor-grabbing hover:bg-white/[0.03] rounded transition-colors text-left">
-                      <input type="checkbox" checked={sub.done} onChange={() => toggleSubtask(idx)} className="appearance-none w-3.5 h-3.5 bg-transparent border border-slate-600 rounded-sm checked:bg-indigo-500 checked:border-indigo-500 cursor-pointer shrink-0 mt-[3px] flex items-center justify-center after:content-['✓'] after:text-white after:text-[10px] after:font-bold after:opacity-0 checked:after:opacity-100 transition-all" />
-                      <div className="flex-1 flex items-start gap-2 min-w-0">
-                        <AutoTextarea 
-                          value={sub.name} 
-                          onChange={(val: string) => updateSubtaskName(idx, val)}
-                          className={`leading-relaxed ${sub.done ? "text-slate-500/60 line-through" : "text-slate-300"}`}
+              return (
+                <div className="absolute inset-0 overflow-y-auto custom-scrollbar p-3 space-y-1">
+                  <div className="mb-4 bg-[#0a0d14] rounded-lg border border-slate-700/50 p-3 shadow-inner">
+                    <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">Task Name</p>
+                    <AutoTextarea 
+                      value={activeTask} 
+                      onChange={(val: string) => {
+                        if (val && val.trim() !== "") {
+                          updateTaskField(activeTask, "Name", val);
+                        }
+                      }}
+                      className="text-[13px] font-bold text-indigo-300 tracking-wider leading-snug w-full"
+                    />
+                  </div>
+                  
+                  <div className="flex gap-2 mb-3">
+                    <input 
+                      type="text" 
+                      value={newSubtask}
+                      onChange={(e) => setNewSubtask(e.target.value)}
+                      onKeyDown={(e) => e.key === 'Enter' && handleAddSubtask()}
+                      placeholder="Add subtask..."
+                      className="flex-1 bg-[#0a0d14] border border-slate-700 rounded px-2.5 py-1.5 text-[12px] text-slate-200 focus:border-indigo-500 focus:outline-none transition-colors"
+                    />
+                    <button onClick={handleAddSubtask} className="bg-indigo-500/20 hover:bg-indigo-500/30 text-indigo-300 border border-indigo-500/30 px-3 rounded font-bold text-[16px] transition-colors pb-0.5">+</button>
+                  </div>
+
+                  <div className="flex-1 overflow-y-auto custom-scrollbar space-y-0.5">
+                    {sortedSubs.map((sub: any) => (
+                      <div 
+                        key={`sub-${sub.originalIdx}`} 
+                        draggable 
+                        onDragStart={(e) => handleSubtaskDragStart(e, sub.originalIdx)}
+                        onDragOver={handleRowDragOver}
+                        onDrop={(e) => handleSubtaskDrop(e, sub.originalIdx)}
+                        className="flex items-start gap-2.5 py-2 px-1 group cursor-grab active:cursor-grabbing hover:bg-white/[0.03] rounded transition-colors text-left"
+                      >
+                        <input 
+                          type="checkbox" 
+                          checked={sub.done} 
+                          onChange={() => toggleSubtask(sub.originalIdx)} 
+                          className="appearance-none w-3.5 h-3.5 bg-transparent border border-slate-600 rounded-sm checked:bg-indigo-500 checked:border-indigo-500 shrink-0 mt-0.5 relative cursor-pointer
+                          after:content-[''] after:absolute after:hidden checked:after:block after:w-[3px] after:h-[7px] after:border-r-2 after:border-b-2 after:border-white after:rotate-45 after:left-[4px] after:top-[1px] transition-colors"
                         />
-                        {getUrl(sub.name) && <a href={getUrl(sub.name)!} target="_blank" rel="noreferrer" title="Open Link" className="text-indigo-400/70 hover:text-indigo-300 text-[10px] shrink-0 mt-1 transition-colors">🔗</a>}
+                        <div className="flex-1 min-w-0 pt-[1px] flex flex-col">
+                          <AutoTextarea 
+                            value={sub.name} 
+                            onChange={(val: string) => updateSubtaskName(sub.originalIdx, val)}
+                            className={`leading-relaxed ${sub.done ? "text-slate-500/60 line-through" : "text-slate-300"}`}
+                          />
+                          {getUrl(sub.name) && <a href={getUrl(sub.name)!} target="_blank" rel="noreferrer" title="Open Link" className="text-indigo-400/70 hover:text-indigo-300 text-[10px] shrink-0 mt-1 transition-colors">🔗</a>}
+                        </div>
+                        <button onClick={() => deleteSubtask(sub.originalIdx)} className="opacity-0 group-hover:opacity-100 transition-opacity hover:scale-110 text-xs mt-0.5" title="Delete subtask">🗑️</button>
+                        <span className="text-slate-600/50 cursor-grab select-none shrink-0 opacity-0 group-hover:opacity-100 mt-0.5 text-[14px]">⋮⋮</span>
                       </div>
-                      <button onClick={() => deleteSubtask(idx)} className="opacity-0 group-hover:opacity-100 transition-opacity hover:scale-110 text-[12px] mt-0.5" title="Delete subtask">🗑️</button>
-                      <span className="text-slate-600/50 cursor-grab select-none shrink-0 opacity-0 group-hover:opacity-100 mt-0.5 text-[14px]">⋮⋮</span>
-                    </div>
-                  ))}
-                  {(subtaskDict[activeTask] || []).length === 0 && <p className="text-[12px] text-slate-600 italic py-4 text-center">No subtasks yet.</p>}
+                    ))}
+                    {sortedSubs.length === 0 && <p className="text-[12px] text-slate-600 italic py-4 text-center">No subtasks yet.</p>}
+                  </div>
                 </div>
-              </>
-            ) : (
+              );
+            })() : (
               <div className="absolute inset-0 flex items-center justify-center p-8 text-center pointer-events-none">
-                <p className="text-[13px] text-slate-500/50 italic font-light tracking-wide leading-relaxed">
-                  Select a task row to manage its subtasks.
+                <p className="text-[13px] text-slate-500/50 italic font-medium leading-relaxed">
+                  Select a task to view <br/>or add its subtasks.
                 </p>
               </div>
             )}

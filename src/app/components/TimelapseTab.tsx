@@ -12,17 +12,25 @@ export default function TimelapseTab({ appState }: { appState: any }) {
   const [outlookEvents, setOutlookEvents] = useState<any[]>([]);
   
   const weekDateRef = useRef<HTMLInputElement>(null);
+  
+  // 1. Independent Scroll Refs Map and Clock Tracker
+  const scrollRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  const [liveMins, setLiveMins] = useState<number>(0);
 
   useEffect(() => {
     if (typeof window !== "undefined") {
       const saved = localStorage.getItem("syncOutlook");
       if (saved === "true") setShowOutlook(true);
     }
+    
+    const updateClock = () => {
+      const now = new Date();
+      setLiveMins(now.getHours() * 60 + now.getMinutes());
+    };
+    updateClock();
+    const ticker = setInterval(updateClock, 60000);
+    return () => clearInterval(ticker);
   }, []);
-
-  useEffect(() => {
-    if (typeof window !== "undefined") localStorage.setItem("syncOutlook", String(showOutlook));
-  }, [showOutlook]);
 
   const { instance, accounts, inProgress } = useMsal();
 
@@ -31,6 +39,19 @@ export default function TimelapseTab({ appState }: { appState: any }) {
     const end = endOfWeek(currentDate, { weekStartsOn: 1 });
     return { startDate: start, endDate: end, days: eachDayOfInterval({ start, end }) };
   }, [currentDate]);
+
+  // Restore scrolls for each active column whenever the displayed days change
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      days.forEach((day) => {
+        const dateKey = format(day, 'yyyy-MM-dd');
+        const savedScroll = localStorage.getItem(`timelapseScroll_${dateKey}`);
+        if (savedScroll && scrollRefs.current[dateKey]) {
+          scrollRefs.current[dateKey]!.scrollTop = parseInt(savedScroll, 10);
+        }
+      });
+    }
+  }, [days]);
 
   const WEEKDAYS_SHORT = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
@@ -83,17 +104,31 @@ export default function TimelapseTab({ appState }: { appState: any }) {
     return { start, end, hasTime };
   };
 
+  // Outlook cache memory management
   useEffect(() => {
-    if (showOutlook && accounts.length > 0) {
+    if (showOutlook) {
       const fetchOutlook = async () => {
         try {
-          const response = await instance.acquireTokenSilent({ scopes: ["Calendars.Read"], account: accounts[0] })
-            .catch(async (err) => {
-              if (err.name === "InteractionRequiredAuthError") await instance.acquireTokenRedirect({ scopes: ["Calendars.Read"] });
-              throw err;
-            });
+          const cachedToken = localStorage.getItem("outlook_token");
+          const expiryTime = localStorage.getItem("outlook_token_expiry");
+          const now = new Date().getTime();
+          let tokenToUse = cachedToken;
 
-          const graphClient = Client.init({ authProvider: (done) => done(null, response.accessToken) });
+          if (!cachedToken || !expiryTime || now >= parseInt(expiryTime, 10)) {
+            if (accounts.length === 0) return;
+            const response = await instance.acquireTokenSilent({ scopes: ["Calendars.Read"], account: accounts[0] })
+              .catch(async (err) => {
+                if (err.name === "InteractionRequiredAuthError") await instance.acquireTokenRedirect({ scopes: ["Calendars.Read"] });
+                throw err;
+              });
+            tokenToUse = response.accessToken;
+            localStorage.setItem("outlook_token", tokenToUse);
+            localStorage.setItem("outlook_token_expiry", (now + 3000000).toString()); // ~50 mins validity
+          }
+
+          if (!tokenToUse) return;
+
+          const graphClient = Client.init({ authProvider: (done) => done(null, tokenToUse) });
           const startIso = format(startDate, "yyyy-MM-dd'T'00:00:00'Z'");
           const endIso = format(endDate, "yyyy-MM-dd'T'23:59:59'Z'");
 
@@ -111,16 +146,21 @@ export default function TimelapseTab({ appState }: { appState: any }) {
               date: localStart.toISOString().split('T')[0],
               start: localStart.getUTCHours() * 60 + localStart.getUTCMinutes(),
               end: localEnd.getUTCHours() * 60 + localEnd.getUTCMinutes(),
-              hasTime: true
+              hasTime: true,
+              isCompleted: false
             };
           });
           setOutlookEvents(events);
-        } catch (err) { console.error("Outlook fetch failed:", err); }
+        } catch (err) { 
+          console.error("Outlook fetch failed:", err);
+          localStorage.removeItem("outlook_token");
+        }
       };
       fetchOutlook();
     } else { setOutlookEvents([]); }
   }, [showOutlook, startDate, endDate, instance, accounts]);
 
+  // Session-Aware Timeline Data Generation
   const timelineData = useMemo(() => {
     const data: Record<string, any[]> = {};
     const addEvent = (dateKey: string, event: any) => {
@@ -141,26 +181,40 @@ export default function TimelapseTab({ appState }: { appState: any }) {
       const name = task.Name || task.Task || task.Title || "Untitled";
       const category = task.Category || "Other";
       const status = task.Status || task.status || "Active";
-      const isCompleted = status === "Completed" || status === "Done";
+      const taskCompleted = status === "Completed" || status === "Done";
       
       const rawDueDate = task["Due Date"] || task.Due || task.Deadline;
       const dueDateKey = standardizeDate(rawDueDate);
       if (dueDateKey) {
         const times = parseTimeInterval(task["Due Time"] || task.DueTime || task.time);
-        addEvent(dueDateKey, { type: 'due', name, category, status, isCompleted, start: times.start, end: times.end, hasTime: times.hasTime });
+        addEvent(dueDateKey, { type: 'due', name, category, isCompleted: taskCompleted, start: times.start, end: times.end, hasTime: times.hasTime });
       }
 
-      const logEvent = (dateKey: string, startTime: string, endTime: string, mixedTime: string, sessionName?: string) => {
-        const times = parseTimeInterval(startTime, endTime, mixedTime);
-        addEvent(dateKey, { type: 'logged', name, sessionName, category, status, isCompleted, start: times.start, end: times.end, hasTime: times.hasTime });
-      };
-
+      // Check primary parent task logged Date
       const loggedDateKey = standardizeDate(task.Date || task.date);
-      if (loggedDateKey) logEvent(loggedDateKey, task.Start || task["Start Time"], task.End || task["End Time"], task.Time || task.time);
+      if (loggedDateKey && (!task.sessions || task.sessions.length === 0)) {
+         const times = parseTimeInterval(task.Start || task["Start Time"], task.End || task["End Time"], task.Time || task.time);
+         addEvent(loggedDateKey, { type: 'logged', name, category, isCompleted: taskCompleted, start: times.start, end: times.end, hasTime: times.hasTime });
+      }
       
+      // Check individual sessions 
       (task.sessions || []).forEach((s: any) => {
         const sessionKey = standardizeDate(s.date || s.Date);
-        if (sessionKey) logEvent(sessionKey, s.start_time, s.end_time, s.time || s.Time, s.name);
+        if (sessionKey) {
+            const times = parseTimeInterval(s.start_time, s.end_time, s.time || s.Time);
+            const sCompleted = s.status === "Completed" || s.Status === "Completed" || s.completed === true;
+            addEvent(sessionKey, { type: 'logged', name, sessionName: s.name, category, isCompleted: sCompleted, start: times.start, end: times.end, hasTime: times.hasTime });
+        }
+        
+        // Subs-sessions
+        (s.subsessions || []).forEach((sub: any) => {
+           const subKey = standardizeDate(sub.date || sub.Date);
+           if (subKey) {
+              const times = parseTimeInterval(sub.start_time, sub.end_time, sub.time || sub.Time);
+              const subCompleted = sub.status === "Completed" || sub.Status === "Completed" || sub.completed === true;
+              addEvent(subKey, { type: 'logged', name, sessionName: sub.name, category, isCompleted: subCompleted, start: times.start, end: times.end, hasTime: times.hasTime });
+           }
+        });
       });
     });
 
@@ -184,7 +238,6 @@ export default function TimelapseTab({ appState }: { appState: any }) {
   return (
     <div className="flex flex-col h-full text-neutral-300 p-4">
       
-      {/* --- Box-less Header Toolbar --- */}
       <div className="flex justify-between items-center mb-6 shrink-0 px-2">
         <div className="flex gap-1 items-center relative">
           <button onClick={prevWeek} className="text-neutral-400 hover:text-neutral-200 px-3 py-1 text-lg font-bold transition-colors outline-none hover:bg-white/[0.05] rounded">&lt;</button>
@@ -222,8 +275,7 @@ export default function TimelapseTab({ appState }: { appState: any }) {
         </div>
       </div>
 
-      {/* --- INDEPENDENT COLUMNS GRID --- */}
-      <div className="flex-1 flex gap-4 overflow-x-auto custom-scrollbar pb-4 min-h-0 px-2">
+      <div className="flex-1 flex gap-4 overflow-x-auto custom-scrollbar pb-4 min-h-0 px-2 relative">
         {days.map((day, i) => {
           const dateKey = format(day, 'yyyy-MM-dd');
           const dayEvents = timelineData[dateKey] || [];
@@ -233,16 +285,21 @@ export default function TimelapseTab({ appState }: { appState: any }) {
           const timedEvents = dayEvents.filter(e => e.hasTime);
 
           return (
-            <div key={dateKey} className="flex-1 flex flex-col min-w-[180px] max-w-[320px] h-full">
-              <div className="mb-2 shrink-0 px-2">
+            <div key={dateKey} className="flex-1 flex flex-col min-w-[180px] max-w-[320px] h-full relative">
+              <div className="mb-2 shrink-0 px-2 sticky top-0 z-50 bg-[#050505] pt-1">
                 <div className={`font-bold text-base ${isTodayFlag ? 'text-indigo-400' : 'text-neutral-200'}`}>{WEEKDAYS_SHORT[i]}</div>
                 <div className={`text-xs ${isTodayFlag ? 'text-indigo-300 font-semibold' : 'text-neutral-500'}`}>{format(day, 'dd/MM')}</div>
               </div>
 
-              {/* === SCROLLABLE TIMELINE GRID === */}
-              <div className={`flex-1 overflow-y-auto custom-scrollbar rounded-xl border relative shadow-sm ${isTodayFlag ? 'bg-neutral-800/30 border-indigo-500/30' : 'bg-[#0a0a0a] border-neutral-800'}`}>
+              {/* INDEPENDENT SCROLL CONTAINER FOR THE DAY TIMELAPSE */}
+              <div 
+                ref={(el) => { scrollRefs.current[dateKey] = el; }}
+                onScroll={(e) => {
+                  localStorage.setItem(`timelapseScroll_${dateKey}`, e.currentTarget.scrollTop.toString());
+                }}
+                className={`flex-1 overflow-y-auto custom-scrollbar rounded-xl border relative shadow-sm ${isTodayFlag ? 'bg-neutral-800/30 border-indigo-500/30' : 'bg-[#0a0a0a] border-neutral-800'}`}
+              >
                 
-                {/* === TIMELESS (ALL-DAY) TASKS === */}
                 {timelessEvents.length > 0 && (
                   <div className="px-2 pt-2 pb-2 space-y-1.5 shrink-0 border-b border-neutral-800/50 relative z-20">
                     {timelessEvents.map((evt, idx) => {
@@ -265,7 +322,7 @@ export default function TimelapseTab({ appState }: { appState: any }) {
                       }
 
                       return (
-                        <div key={`timeless-${dateKey}-${idx}`} className={`p-1.5 rounded shadow-sm border text-[11px] leading-snug break-words whitespace-normal ${bgClass} ${borderClass} ${textClass}`}>
+                        <div key={`timeless-${dateKey}-${idx}`} className={`p-1.5 rounded shadow-sm border text-[11px] leading-snug break-words whitespace-normal overflow-y-auto max-h-16 custom-scrollbar ${bgClass} ${borderClass} ${textClass}`}>
                           <div className="flex items-start gap-1">
                             {evt.isCompleted && <span className="text-emerald-600 font-bold shrink-0">✓</span>}
                             <div className="flex flex-col flex-1 min-w-0">
@@ -281,12 +338,22 @@ export default function TimelapseTab({ appState }: { appState: any }) {
                   </div>
                 )}
 
-                <div className="relative h-[1440px] w-full mt-1">
+                <div className="relative h-[1440px] w-full mt-1 overflow-hidden">
                   {hours.map(h => (
                     <div key={`line-${h}`} className="absolute w-full flex items-start border-t border-neutral-800/50" style={{ top: `${h * 60}px`, height: '60px' }}>
                       <span className="text-[10px] text-neutral-600 font-mono pl-2 pt-1 select-none">{String(h).padStart(2, '0')}:00</span>
                     </div>
                   ))}
+
+                  {/* LIVE LINE INDICATOR */}
+                  {isTodayFlag && (
+                    <div 
+                      className="absolute left-10 right-0 border-t border-red-500/80 z-40 pointer-events-none flex items-center transition-all duration-500 shadow-sm shadow-red-500/20"
+                      style={{ top: `${liveMins}px` }}
+                    >
+                      <span className="bg-red-500 text-white font-extrabold tracking-wider text-[8px] px-1 py-[1px] rounded-sm -mt-2 -ml-2">LIVE</span>
+                    </div>
+                  )}
 
                   {timedEvents.map((evt, idx) => {
                     const startMins = evt.start || 0;
@@ -319,24 +386,24 @@ export default function TimelapseTab({ appState }: { appState: any }) {
                     return (
                       <div 
                         key={`evt-${dateKey}-${idx}`} 
-                        className={`absolute left-10 right-2 rounded shadow-sm p-1.5 z-10 hover:z-20 hover:shadow-md transition-all flex flex-col h-fit leading-tight whitespace-normal break-words ${bgClass} ${borderClass} ${textClass}`}
-                        style={{ top: `${startMins}px`, minHeight: `${heightMins}px` }}
+                        className={`absolute left-10 right-2 rounded shadow-sm p-1.5 z-10 hover:z-30 hover:shadow-lg transition-all flex flex-col overflow-hidden ${bgClass} ${borderClass} ${textClass}`}
+                        style={{ top: `${startMins}px`, height: `${heightMins}px` }}
                         title={`${evt.name} (${Math.floor(startMins/60)}:${String(startMins%60).padStart(2,'0')} - ${Math.floor(endMins/60)}:${String(endMins%60).padStart(2,'0')})`}
                       >
-                        <div className="flex flex-col justify-start">
-                          <span className={`text-[10px] font-mono mb-0.5 ${evt.isCompleted ? 'text-neutral-600' : 'text-neutral-400'}`}>
+                        <div className="w-full h-full overflow-y-auto custom-scrollbar flex flex-col pr-1">
+                          <span className={`text-[10px] font-mono mb-0.5 shrink-0 ${evt.isCompleted ? 'text-neutral-600' : 'text-neutral-400'}`}>
                             {evt.isCompleted && <span className="mr-1 text-emerald-600 font-bold">✓</span>}
                             {Math.floor(startMins/60)}:{String(startMins%60).padStart(2,'0')} - {Math.floor(endMins/60)}:{String(endMins%60).padStart(2,'0')}
                           </span>
                           
-                          {evt.type === 'due' && !evt.isCompleted && <span className="font-bold text-rose-400 mb-0.5 tracking-wider text-[9px]">🚩 DUE</span>}
+                          {evt.type === 'due' && !evt.isCompleted && <span className="font-bold text-rose-400 mb-0.5 tracking-wider text-[9px] shrink-0">🚩 DUE</span>}
                           
-                          <span className="text-xs font-bold leading-tight break-words">
+                          <span className="text-xs font-bold leading-tight whitespace-normal break-words">
                             {evt.name}
                           </span>
                           
-                          {evt.sessionName && <span className="text-[10px] opacity-70 block mt-0.5 break-words whitespace-normal font-medium italic">({evt.sessionName})</span>}
-                          {evt.category && <span className="text-[9px] opacity-60 mt-auto pt-1 block tracking-wider">{evt.category}</span>}
+                          {evt.sessionName && <span className="text-[10px] opacity-70 block mt-0.5 whitespace-normal break-words font-medium italic">({evt.sessionName})</span>}
+                          {evt.category && <span className="text-[9px] opacity-60 mt-auto pt-1 block tracking-wider shrink-0">{evt.category}</span>}
                         </div>
                       </div>
                     );

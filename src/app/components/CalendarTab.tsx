@@ -96,20 +96,35 @@ export default function CalendarTab({ appState }: { appState: any }) {
     return 0;
   };
 
+  // Outlook cache memory management
   useEffect(() => {
-    if (showOutlook && accounts.length > 0) {
+    if (showOutlook) {
       const fetchOutlook = async () => {
         try {
-          const response = await instance.acquireTokenSilent({ scopes: ["Calendars.Read"], account: accounts[0] })
-            .catch(async (err) => {
-              if (err.name === "InteractionRequiredAuthError") await instance.acquireTokenRedirect({ scopes: ["Calendars.Read"] });
-              throw err;
-            });
-          const graphClient = Client.init({ authProvider: (done) => done(null, response.accessToken) });
-          const start = format(fetchStart, "yyyy-MM-dd'T'00:00:00'Z'");
-          const end = format(fetchEnd, "yyyy-MM-dd'T'23:59:59'Z'");
+          const cachedToken = localStorage.getItem("outlook_token");
+          const expiryTime = localStorage.getItem("outlook_token_expiry");
+          const now = new Date().getTime();
+          let tokenToUse = cachedToken;
 
-          const res = await graphClient.api('/me/calendarview').query({ startDateTime: start, endDateTime: end }).top(200).get();
+          if (!cachedToken || !expiryTime || now >= parseInt(expiryTime, 10)) {
+            if (accounts.length === 0) return;
+            const response = await instance.acquireTokenSilent({ scopes: ["Calendars.Read"], account: accounts[0] })
+              .catch(async (err) => {
+                if (err.name === "InteractionRequiredAuthError") await instance.acquireTokenRedirect({ scopes: ["Calendars.Read"] });
+                throw err;
+              });
+            tokenToUse = response.accessToken;
+            localStorage.setItem("outlook_token", tokenToUse);
+            localStorage.setItem("outlook_token_expiry", (now + 3000000).toString()); // ~50 mins validity
+          }
+
+          if (!tokenToUse) return;
+
+          const graphClient = Client.init({ authProvider: (done) => done(null, tokenToUse) });
+          const startIso = format(fetchStart, "yyyy-MM-dd'T'00:00:00'Z'");
+          const endIso = format(fetchEnd, "yyyy-MM-dd'T'23:59:59'Z'");
+
+          const res = await graphClient.api('/me/calendarview').query({ startDateTime: startIso, endDateTime: endIso }).top(200).get();
 
           const events = res.value.map((e: any) => {
             const utcDate = new Date(e.start.dateTime + 'Z'); 
@@ -121,10 +136,13 @@ export default function CalendarTab({ appState }: { appState: any }) {
             const startStr = `${String(localStart.getUTCHours()).padStart(2,'0')}:${String(localStart.getUTCMinutes()).padStart(2,'0')}`;
             const endStr = `${String(localEnd.getUTCHours()).padStart(2,'0')}:${String(localEnd.getUTCMinutes()).padStart(2,'0')}`;
             
-            return { type: 'outlook', name: e.subject, timeValue: parseTimeStr(startStr), timeLabel: `${startStr} - ${endStr}`, date: datePart };
+            return { type: 'outlook', name: e.subject, timeValue: parseTimeStr(startStr), timeLabel: `${startStr} - ${endStr}`, date: datePart, isCompleted: false };
           });
           setOutlookEvents(events);
-        } catch (err) { console.error("Outlook fetch failed:", err); }
+        } catch (err) { 
+          console.error("Outlook fetch failed:", err);
+          localStorage.removeItem("outlook_token");
+        }
       };
       fetchOutlook();
     } else { setOutlookEvents([]); }
@@ -134,7 +152,7 @@ export default function CalendarTab({ appState }: { appState: any }) {
     const data: Record<string, any[]> = {};
     const addEvent = (dateKey: string, event: any) => {
       if (!data[dateKey]) data[dateKey] = [];
-      const exists = data[dateKey].find(e => e.name === event.name && e.type === event.type);
+      const exists = data[dateKey].find(e => e.name === event.name && e.type === event.type && (e.type !== 'session_group'));
       if (!exists) data[dateKey].push(event);
     };
 
@@ -151,29 +169,68 @@ export default function CalendarTab({ appState }: { appState: any }) {
       const name = task.Name || task.Task || task.Title || "Untitled";
       const category = task.Category || "Other";
       const status = task.Status || task.status || "Active";
-      const isCompleted = status === "Completed" || status === "Done";
+      const taskCompleted = status === "Completed" || status === "Done";
       
+      // Calculate continuous overall completion status across ALL sessions regardless of date
+      const hasSessions = Array.isArray(task.sessions) && task.sessions.length > 0;
+      const isFullyCompletedOverall = hasSessions 
+        ? task.sessions.every((s: any) => s.status === "Completed" || s.Status === "Completed" || s.completed === true)
+        : taskCompleted;
+
       const rawDueDate = task["Due Date"] || task.Due || task.Deadline;
       const dueDateKey = standardizeDate(rawDueDate);
       if (dueDateKey) {
         const rawDueTime = task["Due Time"] || task.time || "";
-        addEvent(dueDateKey, { type: 'due', name, category, status, isCompleted, timeValue: parseTimeStr(rawDueTime), timeLabel: rawDueTime });
+        addEvent(dueDateKey, { type: 'due', name, category, status, isCompleted: taskCompleted, isFullyCompletedOverall, timeValue: parseTimeStr(rawDueTime), timeLabel: rawDueTime });
       }
 
-      const logEvent = (dateKey: string, startTime: string, endTime: string, sessionName?: string) => {
-        let label = startTime || "";
-        if (startTime && endTime) label = `${startTime} - ${endTime}`;
-        addEvent(dateKey, { type: 'logged', name, category, sessionName, status, isCompleted, timeValue: parseTimeStr(startTime), timeLabel: label });
-      };
+      // Group sessions by date
+      const sessionsByDate: Record<string, any[]> = {};
+      (task.sessions || []).forEach((s: any) => {
+        const sDate = standardizeDate(s.date || s.Date);
+        if (sDate) {
+          if (!sessionsByDate[sDate]) sessionsByDate[sDate] = [];
+          sessionsByDate[sDate].push(s);
+        }
+      });
 
       const loggedDateKey = standardizeDate(task.Date || task.date);
-      if (loggedDateKey) {
-        logEvent(loggedDateKey, task.Start || task["Start Time"] || task.Time || "", task.End || task["End Time"] || "");
+      
+      // If task has NO sessions on its primary date, log the main task explicitly
+      if (loggedDateKey && !sessionsByDate[loggedDateKey]) {
+        const startTime = task.Start || task["Start Time"] || task.Time || "";
+        const endTime = task.End || task["End Time"] || "";
+        let label = startTime;
+        if (startTime && endTime) label = `${startTime} - ${endTime}`;
+        addEvent(loggedDateKey, { type: 'logged', name, category, status, isCompleted: taskCompleted, isFullyCompletedOverall, timeValue: parseTimeStr(startTime), timeLabel: label });
       }
       
-      (task.sessions || []).forEach((s: any) => {
-        const sessionKey = standardizeDate(s.date || s.Date);
-        if (sessionKey) logEvent(sessionKey, s.start_time || s.time, s.end_time, s.name);
+      // Plot grouped sessions
+      Object.entries(sessionsByDate).forEach(([dateStr, daySessions]) => {
+        // If ALL sessions for this day are complete, mark the parent as complete for this day
+        const allDailySessionsCompleted = daySessions.every((s: any) => 
+          s.status === "Completed" || s.Status === "Completed" || s.completed === true
+        );
+        
+        const firstSessionTime = daySessions[0]?.start_time || daySessions[0]?.time || "";
+
+        addEvent(dateStr, {
+          type: 'session_group',
+          name: name,
+          category: category,
+          isCompleted: allDailySessionsCompleted,
+          isFullyCompletedOverall: isFullyCompletedOverall,
+          timeValue: parseTimeStr(firstSessionTime),
+          sessions: daySessions.map((s: any) => {
+            let label = s.start_time || s.time || "";
+            if (s.start_time && s.end_time) label = `${s.start_time} - ${s.end_time}`;
+            return {
+              name: s.name || name,
+              timeLabel: label,
+              isCompleted: s.status === "Completed" || s.Status === "Completed" || s.completed === true
+            };
+          })
+        });
       });
     });
 
@@ -266,6 +323,7 @@ export default function CalendarTab({ appState }: { appState: any }) {
 
                     if (evt.isCompleted) {
                       bgClass = "bg-transparent";
+                      borderClass = "border border-neutral-700/50";
                       textClass = "text-neutral-500 line-through decoration-neutral-600";
                     } else if (evt.type === 'due') {
                       bgClass = "bg-rose-900/30";
@@ -281,11 +339,39 @@ export default function CalendarTab({ appState }: { appState: any }) {
                       textClass = "text-indigo-200";
                     }
 
+                    // Render Grouped Sessions
+                    if (evt.type === 'session_group') {
+                      return (
+                        <div key={i} className={`text-[11px] px-2 py-1.5 rounded flex flex-col leading-tight whitespace-normal break-words shadow-sm ${bgClass} ${borderClass} ${textClass}`}>
+                          <span className={`font-bold w-full ${evt.isCompleted ? 'text-neutral-500' : ''}`}>
+                            {evt.isFullyCompletedOverall && <span className="text-emerald-500 mr-1 not-italic font-bold">✓</span>}
+                            {evt.name}
+                          </span>
+                          <div className="flex flex-col gap-1 mt-1 pl-1.5 border-l border-indigo-500/30 ml-0.5">
+                            {evt.sessions.map((session: any, sIdx: number) => (
+                              <div key={sIdx} className={`flex flex-col ${session.isCompleted ? 'line-through opacity-50' : ''}`}>
+                                {session.timeLabel && <span className="font-mono text-[9px] opacity-80 mb-[1px]">{session.timeLabel}</span>}
+                                <span className="italic text-[10px] font-medium leading-snug">
+                                  {session.isCompleted && <span className="text-emerald-500 mr-1 not-italic font-bold">✓</span>}
+                                  {session.name}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                          {evt.category && <span className="text-[9px] opacity-60 mt-1.5 block tracking-wider">{evt.category}</span>}
+                        </div>
+                      );
+                    }
+
+                    // Render Regular Task or Outlook Event
                     return (
                       <div key={i} className={`text-[11px] px-2 py-1.5 rounded flex flex-col leading-tight whitespace-normal break-words shadow-sm ${bgClass} ${borderClass} ${textClass}`}>
                         {timeStr && <span className={`font-mono mb-0.5 ${evt.isCompleted ? 'text-neutral-600' : 'text-neutral-400'}`}>{timeStr}</span>}
                         {evt.type === 'due' && !evt.isCompleted && <span className="font-bold text-rose-400 mb-0.5 tracking-wider text-[10px]">🚩 DUE</span>}
-                        <span className="font-bold w-full">{evt.name}</span>
+                        <span className="font-bold w-full">
+                          {evt.isFullyCompletedOverall && <span className="text-emerald-500 mr-1 not-italic font-bold">✓</span>}
+                          {evt.name}
+                        </span>
                         {evt.sessionName && <span className="w-full text-[10px] font-medium italic opacity-80 mt-0.5 break-words">({evt.sessionName})</span>}
                         {evt.category && <span className="text-[9px] opacity-60 mt-auto pt-1 block tracking-wider">{evt.category}</span>}
                       </div>
